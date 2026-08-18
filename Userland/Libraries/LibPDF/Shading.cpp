@@ -31,7 +31,6 @@ struct CommonEntries {
     //  area to be painted that lie outside the bounds of the shading object
     //  Note: The background color is applied only when the shading is used as part of
     //  a shading pattern, not when it is painted directly with the sh operator."
-    // We currently don't support shading patterns yet, so we don't use this yet.
     Optional<Vector<float>> background {};
 
     // "(Optional) An array of four numbers giving the left, bottom, right, and top
@@ -48,6 +47,13 @@ struct CommonEntries {
     //  ignored. Default value: false."
     // We currently ignore this.
     bool anti_alias { false };
+
+    PDFErrorOr<Optional<Gfx::Color>> background_for_pattern() const
+    {
+        if (!background.has_value())
+            return Optional<Gfx::Color> {};
+        return TRY(color_space->color(background.value()));
+    }
 };
 
 PDFErrorOr<CommonEntries> read_common_entries(Document* document, DictObject const& shading_dict, Renderer& renderer)
@@ -124,6 +130,7 @@ public:
     static PDFErrorOr<NonnullRefPtr<FunctionBasedShading>> create(Document*, NonnullRefPtr<DictObject>, CommonEntries);
 
     virtual Optional<Gfx::FloatRect> bounding_box() const override { return m_common_entries.b_box; }
+    virtual PDFErrorOr<Optional<Gfx::Color>> background_for_pattern() const override { return m_common_entries.background_for_pattern(); }
     virtual PDFErrorOr<void> draw(Gfx::Painter&, Gfx::AffineTransform const&) override;
 
 private:
@@ -232,8 +239,8 @@ PDFErrorOr<void> FunctionBasedShading::draw(Gfx::Painter& painter, Gfx::AffineTr
                     return {};
                 }));
 
-            auto color = TRY(m_common_entries.color_space->style(color_components));
-            bitmap.scanline(y)[x] = color.get<Gfx::Color>().value();
+            auto color = TRY(m_common_entries.color_space->color(color_components));
+            bitmap.scanline(y)[x] = color.value();
         }
     }
 
@@ -245,6 +252,7 @@ public:
     static PDFErrorOr<NonnullRefPtr<AxialShading>> create(Document*, NonnullRefPtr<DictObject>, CommonEntries);
 
     virtual Optional<Gfx::FloatRect> bounding_box() const override { return m_common_entries.b_box; }
+    virtual PDFErrorOr<Optional<Gfx::Color>> background_for_pattern() const override { return m_common_entries.background_for_pattern(); }
     virtual PDFErrorOr<void> draw(Gfx::Painter&, Gfx::AffineTransform const&) override;
 
 private:
@@ -372,8 +380,8 @@ PDFErrorOr<void> AxialShading::draw(Gfx::Painter& painter, Gfx::AffineTransform 
                     return {};
                 }));
 
-            auto color = TRY(m_common_entries.color_space->style(color_components));
-            bitmap.scanline(y)[x] = color.get<Gfx::Color>().value();
+            auto color = TRY(m_common_entries.color_space->color(color_components));
+            bitmap.scanline(y)[x] = color.value();
         }
     }
 
@@ -385,6 +393,7 @@ public:
     static PDFErrorOr<NonnullRefPtr<RadialShading>> create(Document*, NonnullRefPtr<DictObject>, CommonEntries);
 
     virtual Optional<Gfx::FloatRect> bounding_box() const override { return m_common_entries.b_box; }
+    virtual PDFErrorOr<Optional<Gfx::Color>> background_for_pattern() const override { return m_common_entries.background_for_pattern(); }
     virtual PDFErrorOr<void> draw(Gfx::Painter&, Gfx::AffineTransform const&) override;
 
 private:
@@ -603,8 +612,8 @@ PDFErrorOr<void> RadialShading::draw(Gfx::Painter& painter, Gfx::AffineTransform
                     return {};
                 }));
 
-            auto color = TRY(m_common_entries.color_space->style(color_components));
-            bitmap.scanline(y)[x] = color.get<Gfx::Color>().value();
+            auto color = TRY(m_common_entries.color_space->color(color_components));
+            bitmap.scanline(y)[x] = color.value();
         }
     }
 
@@ -701,7 +710,7 @@ Gfx::Color GouraudPaintStyle::sample_color_in_bbox(Gfx::IntPoint point_in_bbox) 
             }
         });
 
-    return MUST(m_color_space->style(color)).get<Gfx::Color>();
+    return MUST(m_color_space->color(color));
 }
 
 void draw_gouraud_triangle(Gfx::Painter& painter, NonnullRefPtr<ColorSpaceWithFloatArgs> color_space, ShadingFunctionsType functions, Array<Gfx::FloatPoint, 3> points, Array<GouraudColor, 3> colors, GouraudBounds const& bounds)
@@ -935,6 +944,7 @@ public:
     static PDFErrorOr<NonnullRefPtr<FreeFormGouraudShading>> create(Document*, NonnullRefPtr<StreamObject>, CommonEntries);
 
     virtual Optional<Gfx::FloatRect> bounding_box() const override { return m_common_entries.b_box; }
+    virtual PDFErrorOr<Optional<Gfx::Color>> background_for_pattern() const override { return m_common_entries.background_for_pattern(); }
     virtual PDFErrorOr<void> draw(Gfx::Painter&, Gfx::AffineTransform const&) override;
 
 private:
@@ -1070,6 +1080,7 @@ public:
     static PDFErrorOr<NonnullRefPtr<LatticeFormGouraudShading>> create(Document*, NonnullRefPtr<StreamObject>, CommonEntries);
 
     virtual Optional<Gfx::FloatRect> bounding_box() const override { return m_common_entries.b_box; }
+    virtual PDFErrorOr<Optional<Gfx::Color>> background_for_pattern() const override { return m_common_entries.background_for_pattern(); }
     virtual PDFErrorOr<void> draw(Gfx::Painter&, Gfx::AffineTransform const&) override;
 
 private:
@@ -1195,6 +1206,7 @@ public:
     static PDFErrorOr<NonnullRefPtr<CoonsPatchShading>> create(Document*, NonnullRefPtr<StreamObject>, CommonEntries);
 
     virtual Optional<Gfx::FloatRect> bounding_box() const override { return m_common_entries.b_box; }
+    virtual PDFErrorOr<Optional<Gfx::Color>> background_for_pattern() const override { return m_common_entries.background_for_pattern(); }
     virtual PDFErrorOr<void> draw(Gfx::Painter&, Gfx::AffineTransform const&) override;
 
 private:
@@ -1515,6 +1527,7 @@ public:
     static PDFErrorOr<NonnullRefPtr<TensorProductPatchShading>> create(Document*, NonnullRefPtr<StreamObject>, CommonEntries);
 
     virtual Optional<Gfx::FloatRect> bounding_box() const override { return m_common_entries.b_box; }
+    virtual PDFErrorOr<Optional<Gfx::Color>> background_for_pattern() const override { return m_common_entries.background_for_pattern(); }
     virtual PDFErrorOr<void> draw(Gfx::Painter&, Gfx::AffineTransform const&) override;
 
 private:

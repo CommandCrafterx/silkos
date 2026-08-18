@@ -29,7 +29,6 @@
 
 namespace PDF {
 
-typedef Variant<Gfx::Color, NonnullRefPtr<Gfx::PaintStyle>> ColorOrStyle;
 class Renderer;
 
 class ColorSpaceFamily {
@@ -66,7 +65,7 @@ public:
 
     virtual ~ColorSpace() = default;
 
-    virtual PDFErrorOr<ColorOrStyle> style(ReadonlySpan<Value> arguments) const = 0;
+    virtual PDFErrorOr<Color> color(ReadonlySpan<Value> arguments) const = 0;
 
     virtual int number_of_components() const = 0;
     virtual Vector<float> default_decode() const = 0; // "TABLE 4.40 Default Decode arrays"
@@ -75,14 +74,20 @@ public:
 
 class ColorSpaceWithFloatArgs : public ColorSpace {
 public:
-    virtual PDFErrorOr<ColorOrStyle> style(ReadonlySpan<float> arguments) const = 0;
+    virtual PDFErrorOr<Color> color(ReadonlySpan<float> arguments) const = 0;
 
-    PDFErrorOr<ColorOrStyle> style(ReadonlySpan<Value> arguments) const override
+    PDFErrorOr<Color> color(ReadonlySpan<Value> arguments) const override
     {
+        if (number_of_components() != static_cast<int>(arguments.size()))
+            return Error::malformed_error("Color space expected {} arguments, got {}", number_of_components(), arguments.size());
+
         Vector<float, 4> float_arguments;
-        for (auto& argument : arguments)
+        for (auto& argument : arguments) {
+            if (!argument.has_number())
+                return Error::malformed_error("Color space expected numeric arguments, got {}", argument);
             float_arguments.append(argument.to_float());
-        return style(float_arguments);
+        }
+        return color(float_arguments);
     }
 };
 
@@ -92,7 +97,7 @@ public:
 
     ~DeviceGrayColorSpace() override = default;
 
-    PDFErrorOr<ColorOrStyle> style(ReadonlySpan<float> arguments) const override;
+    PDFErrorOr<Color> color(ReadonlySpan<float> arguments) const override;
     int number_of_components() const override { return 1; }
     Vector<float> default_decode() const override;
     ColorSpaceFamily const& family() const override { return ColorSpaceFamily::DeviceGray; }
@@ -107,7 +112,7 @@ public:
 
     ~DeviceRGBColorSpace() override = default;
 
-    PDFErrorOr<ColorOrStyle> style(ReadonlySpan<float> arguments) const override;
+    PDFErrorOr<Color> color(ReadonlySpan<float> arguments) const override;
     int number_of_components() const override { return 3; }
     Vector<float> default_decode() const override;
     ColorSpaceFamily const& family() const override { return ColorSpaceFamily::DeviceRGB; }
@@ -122,7 +127,7 @@ public:
 
     ~DeviceCMYKColorSpace() override = default;
 
-    PDFErrorOr<ColorOrStyle> style(ReadonlySpan<float> arguments) const override;
+    PDFErrorOr<Color> color(ReadonlySpan<float> arguments) const override;
     int number_of_components() const override { return 4; }
     Vector<float> default_decode() const override;
     ColorSpaceFamily const& family() const override { return ColorSpaceFamily::DeviceCMYK; }
@@ -137,7 +142,7 @@ public:
 
     ~DeviceNColorSpace() override = default;
 
-    PDFErrorOr<ColorOrStyle> style(ReadonlySpan<float> arguments) const override;
+    PDFErrorOr<Color> color(ReadonlySpan<float> arguments) const override;
     int number_of_components() const override;
     Vector<float> default_decode() const override;
     ColorSpaceFamily const& family() const override { return ColorSpaceFamily::DeviceN; }
@@ -157,7 +162,7 @@ public:
 
     ~CalGrayColorSpace() override = default;
 
-    PDFErrorOr<ColorOrStyle> style(ReadonlySpan<float> arguments) const override;
+    PDFErrorOr<Color> color(ReadonlySpan<float> arguments) const override;
     int number_of_components() const override { return 1; }
     Vector<float> default_decode() const override;
     ColorSpaceFamily const& family() const override { return ColorSpaceFamily::CalGray; }
@@ -176,7 +181,7 @@ public:
 
     ~CalRGBColorSpace() override = default;
 
-    PDFErrorOr<ColorOrStyle> style(ReadonlySpan<float> arguments) const override;
+    PDFErrorOr<Color> color(ReadonlySpan<float> arguments) const override;
     int number_of_components() const override { return 3; }
     Vector<float> default_decode() const override;
     ColorSpaceFamily const& family() const override { return ColorSpaceFamily::CalRGB; }
@@ -196,7 +201,7 @@ public:
 
     ~ICCBasedColorSpace() override = default;
 
-    PDFErrorOr<ColorOrStyle> style(ReadonlySpan<float> arguments) const override;
+    PDFErrorOr<Color> color(ReadonlySpan<float> arguments) const override;
     int number_of_components() const override;
     Vector<float> default_decode() const override;
     ColorSpaceFamily const& family() const override { return ColorSpaceFamily::ICCBased; }
@@ -219,7 +224,7 @@ public:
 
     ~LabColorSpace() override = default;
 
-    PDFErrorOr<ColorOrStyle> style(ReadonlySpan<float> arguments) const override;
+    PDFErrorOr<Color> color(ReadonlySpan<float> arguments) const override;
     int number_of_components() const override { return 3; }
     Vector<float> default_decode() const override;
     ColorSpaceFamily const& family() const override { return ColorSpaceFamily::Lab; }
@@ -238,7 +243,7 @@ public:
 
     ~IndexedColorSpace() override = default;
 
-    PDFErrorOr<ColorOrStyle> style(ReadonlySpan<float> arguments) const override;
+    PDFErrorOr<Color> color(ReadonlySpan<float> arguments) const override;
     int number_of_components() const override { return 1; }
     Vector<float> default_decode() const override;
     ColorSpaceFamily const& family() const override { return ColorSpaceFamily::Indexed; }
@@ -267,7 +272,7 @@ public:
 
     ~SeparationColorSpace() override = default;
 
-    PDFErrorOr<ColorOrStyle> style(ReadonlySpan<float> arguments) const override;
+    PDFErrorOr<Color> color(ReadonlySpan<float> arguments) const override;
     int number_of_components() const override { return 1; }
     Vector<float> default_decode() const override;
     ColorSpaceFamily const& family() const override { return ColorSpaceFamily::Separation; }
@@ -283,23 +288,18 @@ private:
 
 class PatternColorSpace final : public ColorSpace {
 public:
-    static NonnullRefPtr<PatternColorSpace> create(Renderer& renderer, Optional<NonnullRefPtr<DictObject>> extra_resources);
+    static NonnullRefPtr<PatternColorSpace> create();
     ~PatternColorSpace() override = default;
 
-    PDFErrorOr<ColorOrStyle> style(ReadonlySpan<Value> arguments) const override;
+    PDFErrorOr<Color> color(ReadonlySpan<Value> arguments) const override;
     int number_of_components() const override;
     Vector<float> default_decode() const override;
     ColorSpaceFamily const& family() const override { return ColorSpaceFamily::Pattern; }
 
 private:
-    PatternColorSpace(Renderer& renderer, Optional<NonnullRefPtr<DictObject>> extra_resources)
-        : m_renderer(renderer)
-        , m_extra_resources(extra_resources)
+    PatternColorSpace()
     {
     }
-
-    Renderer& m_renderer;
-    Optional<NonnullRefPtr<DictObject>> m_extra_resources;
 };
 
 }

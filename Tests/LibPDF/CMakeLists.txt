@@ -14,6 +14,8 @@ set(TEST_FILES
     encoding.pdf
     encryption_nocopy.pdf
     group.pdf
+    invalid-operator.pdf
+    invalid-paint-objects.pdf
     jbig2-globals.pdf
     jbig2-globals-indirect-reference.pdf
     jpeg2000-indexed-small.pdf
@@ -23,7 +25,9 @@ set(TEST_FILES
     oss-fuzz-testcase-62065.pdf
     password-is-sup.pdf
     paths.pdf
-    pattern.pdf
+    pattern-type1.pdf
+    pattern-type1-rot.pdf
+    pattern-type2.pdf
     rotate.pdf
     shade-coons.pdf
     shade-function.pdf

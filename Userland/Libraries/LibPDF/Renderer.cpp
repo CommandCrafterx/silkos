@@ -97,6 +97,7 @@ Renderer::Renderer(RefPtr<Document> document, Page const& page, RefPtr<Gfx::Bitm
 
     auto initial_clipping_path = bitmap->rect();
     m_graphics_state_stack.append(GraphicsState { userspace_matrix, { initial_clipping_path } });
+    m_userspace_matrix = userspace_matrix;
 
     m_bitmap->fill(background_color);
 }
@@ -134,6 +135,18 @@ PDFErrorsOr<void> Renderer::render()
     if (!errors.errors().is_empty())
         return errors;
     return {};
+}
+
+PDFErrorOr<NonnullRefPtr<Object>> Renderer::get_resource(NonnullRefPtr<DictObject> resources, ByteString const& resource_type, Value const& resource)
+{
+    if (!resources->contains(resource_type))
+        return Error::malformed_error("{} resource dictionary missing", resource_type);
+    auto resource_dictionary = TRY(resources->get_dict(m_document, resource_type));
+
+    auto resource_name = TRY(m_document->resolve_to<NameObject>(resource))->name();
+    if (!resource_dictionary->contains(resource_name))
+        return Error::malformed_error("{} resource dictionary does not contain {}", resource_type, resource_name);
+    return resource_dictionary->get_object(m_document, resource_name);
 }
 
 PDFErrorOr<void> Renderer::handle_operator(Operator const& op, Optional<NonnullRefPtr<DictObject>> extra_resources)
@@ -240,9 +253,7 @@ RENDERER_HANDLER(set_flatness_tolerance)
 RENDERER_HANDLER(set_graphics_state_from_dict)
 {
     auto resources = extra_resources.value_or(m_page.resources);
-    auto dict_name = MUST(m_document->resolve_to<NameObject>(args[0]))->name();
-    auto ext_gstate_dict = MUST(resources->get_dict(m_document, CommonNames::ExtGState));
-    auto target_dict = MUST(ext_gstate_dict->get_dict(m_document, dict_name));
+    auto target_dict = TRY(get_resource(resources, CommonNames::ExtGState, args[0]))->cast<DictObject>();
     TRY(set_graphics_state_from_dict(target_dict));
     return {};
 }
@@ -415,12 +426,6 @@ PDFErrorOr<void> Renderer::restore_previous_clip_after_graphics_state_restore()
 void Renderer::begin_path_paint()
 {
     m_current_path.transform(state().ctm);
-    if (state().paint_style.has<NonnullRefPtr<Gfx::PaintStyle>>()) {
-        VERIFY(!m_original_paint_style);
-        m_original_paint_style = state().paint_style.get<NonnullRefPtr<Gfx::PaintStyle>>();
-        auto translation = Gfx::AffineTransform().translate(m_current_path.bounding_box().x(), m_current_path.bounding_box().y());
-        state().paint_style = { MUST(Gfx::OffsetPaintStyle::create(state().paint_style.get<NonnullRefPtr<Gfx::PaintStyle>>(), translation)) };
-    }
 }
 
 PDFErrorOr<void> Renderer::end_path_paint()
@@ -430,11 +435,6 @@ PDFErrorOr<void> Renderer::end_path_paint()
         m_add_path_as_clip = AddPathAsClip::No;
     }
 
-    if (m_original_paint_style) {
-        state().paint_style = m_original_paint_style.release_nonnull();
-        m_original_paint_style = nullptr;
-    }
-
     // "Once a path has been painted, it is no longer defined; there is then no current path
     //  until a new one is begun with the m or re operator."
     m_current_path.clear();
@@ -442,25 +442,54 @@ PDFErrorOr<void> Renderer::end_path_paint()
     return {};
 }
 
-void Renderer::stroke_current_path()
+PDFErrorOr<void> Renderer::fill_path_with_pattern(Gfx::Path const& path, NonnullRefPtr<Pattern> const& pattern, float opacity, Gfx::WindingRule winding_rule)
 {
-    if (state().stroke_style.has<NonnullRefPtr<Gfx::PaintStyle>>()) {
-        anti_aliasing_painter().stroke_path(m_current_path, state().stroke_style.get<NonnullRefPtr<Gfx::PaintStyle>>(), stroke_style(), state().stroke_alpha_constant);
-    } else {
-        anti_aliasing_painter().stroke_path(m_current_path, state().stroke_style.get<Color>(), stroke_style());
-    }
+    (void)opacity; // FIXME: Use.
+
+    ScopedState scoped_state { *this };
+    TRY(add_clip_path(path, winding_rule));
+
+    // FIXME: Add pattern's bounding box to clip.
+
+    // "Changes to the page’s
+    //  transformation matrix that occur within the page’s content stream, such as rota-
+    //  tion and scaling, have no effect on the pattern; it maintains its original relation-
+    //  ship to the page no matter where on the page it is used."
+    return pattern->draw(painter(), m_userspace_matrix);
 }
 
-void Renderer::fill_current_path(Gfx::WindingRule winding_rule)
+PDFErrorOr<void> Renderer::stroke_current_path()
+{
+    TRY(state().stroke_color.visit(
+        [&](Color const& color) -> PDFErrorOr<void> {
+            anti_aliasing_painter().stroke_path(m_current_path, color, stroke_style());
+            return {};
+        },
+        [&](NonnullRefPtr<Pattern> const& pattern) -> PDFErrorOr<void> {
+            auto stroke_path = m_current_path.stroke_to_fill(stroke_style());
+            return fill_path_with_pattern(stroke_path, pattern, state().stroke_alpha_constant, Gfx::WindingRule::Nonzero);
+        }));
+    return {};
+}
+
+PDFErrorOr<void> Renderer::fill_current_path(Gfx::WindingRule winding_rule)
 {
     auto path_end = m_current_path.end();
     m_current_path.close_all_subpaths();
-    fill_path_with_style(anti_aliasing_painter(), m_current_path, state().paint_style, state().paint_alpha_constant, winding_rule);
+    TRY(state().paint_color.visit(
+        [&](Color const& color) -> PDFErrorOr<void> {
+            fill_path_with_color(anti_aliasing_painter(), m_current_path, color, winding_rule);
+            return {};
+        },
+        [&](NonnullRefPtr<Pattern> const& pattern) -> PDFErrorOr<void> {
+            return fill_path_with_pattern(m_current_path, pattern, state().paint_alpha_constant, winding_rule);
+        }));
     // .close_all_subpaths() only adds to the end of the path, so we can .trim() the path to remove any changes.
     m_current_path.trim(path_end);
+    return {};
 }
 
-void Renderer::fill_and_stroke_current_path(Gfx::WindingRule winding_rule)
+PDFErrorOr<void> Renderer::fill_and_stroke_current_path(Gfx::WindingRule winding_rule)
 {
     // Note: Just drawing the stroke on top of the fill is incorrect if the stroke is not opaque.
     // See "Special Path-Painting Considerations" on page 569 of the PDF 1.7 spec:
@@ -468,14 +497,15 @@ void Renderer::fill_and_stroke_current_path(Gfx::WindingRule winding_rule)
     // (The spec says this in the language of knockout groups.)
     // Having said that, while Acrobat Reader and PDFium get this right, PDF.js and Preview.app do not.
     // FIXME: Once we have support for transparency groups, do this per spec.
-    fill_current_path(winding_rule);
-    stroke_current_path();
+    TRY(fill_current_path(winding_rule));
+    TRY(stroke_current_path());
+    return {};
 }
 
 RENDERER_HANDLER(path_stroke)
 {
     begin_path_paint();
-    stroke_current_path();
+    TRY(stroke_current_path());
     TRY(end_path_paint());
     return {};
 }
@@ -490,7 +520,7 @@ RENDERER_HANDLER(path_close_and_stroke)
 RENDERER_HANDLER(path_fill_nonzero)
 {
     begin_path_paint();
-    fill_current_path(Gfx::WindingRule::Nonzero);
+    TRY(fill_current_path(Gfx::WindingRule::Nonzero));
     TRY(end_path_paint());
     return {};
 }
@@ -503,7 +533,7 @@ RENDERER_HANDLER(path_fill_nonzero_deprecated)
 RENDERER_HANDLER(path_fill_evenodd)
 {
     begin_path_paint();
-    fill_current_path(Gfx::WindingRule::EvenOdd);
+    TRY(fill_current_path(Gfx::WindingRule::EvenOdd));
     TRY(end_path_paint());
     return {};
 }
@@ -511,7 +541,7 @@ RENDERER_HANDLER(path_fill_evenodd)
 RENDERER_HANDLER(path_fill_stroke_nonzero)
 {
     begin_path_paint();
-    fill_and_stroke_current_path(Gfx::WindingRule::Nonzero);
+    TRY(fill_and_stroke_current_path(Gfx::WindingRule::Nonzero));
     TRY(end_path_paint());
     return {};
 }
@@ -519,7 +549,7 @@ RENDERER_HANDLER(path_fill_stroke_nonzero)
 RENDERER_HANDLER(path_fill_stroke_evenodd)
 {
     begin_path_paint();
-    fill_and_stroke_current_path(Gfx::WindingRule::EvenOdd);
+    TRY(fill_and_stroke_current_path(Gfx::WindingRule::EvenOdd));
     TRY(end_path_paint());
     return {};
 }
@@ -625,11 +655,7 @@ PDFErrorOr<void> Renderer::set_font(NonnullRefPtr<DictObject> font_dictionary, f
 RENDERER_HANDLER(text_set_font)
 {
     auto resources = extra_resources.value_or(m_page.resources);
-    auto fonts_dictionary = MUST(resources->get_dict(m_document, CommonNames::Font));
-
-    auto target_font_name = MUST(m_document->resolve_to<NameObject>(args[0]))->name();
-    auto font_dictionary = MUST(fonts_dictionary->get_dict(m_document, target_font_name));
-
+    auto font_dictionary = TRY(get_resource(resources, CommonNames::Font, args[0]))->cast<DictObject>();
     return set_font(font_dictionary, args[1].to_float());
 }
 
@@ -806,83 +832,89 @@ RENDERER_HANDLER(set_painting_space)
 
 RENDERER_HANDLER(set_stroking_color)
 {
-    state().stroke_style = style_with_alpha(TRY(state().stroke_color_space->style(args)), state().stroke_alpha_constant);
+    state().stroke_color = color_with_alpha(TRY(state().stroke_color_space->color(args)), state().stroke_alpha_constant);
     return {};
 }
 
 RENDERER_HANDLER(set_stroking_color_extended)
 {
-    // FIXME: Pattern color spaces might need extra resources
-    state().stroke_style = style_with_alpha(TRY(state().stroke_color_space->style(args)), state().stroke_alpha_constant);
+    if (state().stroke_color_space->family() == ColorSpaceFamily::Pattern) {
+        auto resources = extra_resources.value_or(m_page.resources);
+        auto pattern_object = TRY(get_resource(resources, CommonNames::Pattern, args.last()));
+        state().stroke_color = TRY(Pattern::create(m_document, pattern_object, *this));
+        return {};
+    }
+
+    state().stroke_color = color_with_alpha(TRY(state().stroke_color_space->color(args)), state().stroke_alpha_constant);
     return {};
 }
 
 RENDERER_HANDLER(set_painting_color)
 {
-    state().paint_style = style_with_alpha(TRY(state().paint_color_space->style(args)), state().paint_alpha_constant);
+    state().paint_color = color_with_alpha(TRY(state().paint_color_space->color(args)), state().paint_alpha_constant);
     return {};
 }
 
 RENDERER_HANDLER(set_painting_color_extended)
 {
-    state().paint_style = style_with_alpha(TRY(state().paint_color_space->style(args)), state().paint_alpha_constant);
+    if (state().paint_color_space->family() == ColorSpaceFamily::Pattern) {
+        auto resources = extra_resources.value_or(m_page.resources);
+        auto pattern_object = TRY(get_resource(resources, CommonNames::Pattern, args.last()));
+        state().paint_color = TRY(Pattern::create(m_document, pattern_object, *this));
+        return {};
+    }
+
+    state().paint_color = color_with_alpha(TRY(state().paint_color_space->color(args)), state().paint_alpha_constant);
     return {};
 }
 
 RENDERER_HANDLER(set_stroking_color_and_space_to_gray)
 {
     state().stroke_color_space = DeviceGrayColorSpace::the();
-    state().stroke_style = style_with_alpha(TRY(state().stroke_color_space->style(args)), state().stroke_alpha_constant);
+    state().stroke_color = color_with_alpha(TRY(state().stroke_color_space->color(args)), state().stroke_alpha_constant);
     return {};
 }
 
 RENDERER_HANDLER(set_painting_color_and_space_to_gray)
 {
     state().paint_color_space = DeviceGrayColorSpace::the();
-    state().paint_style = style_with_alpha(TRY(state().paint_color_space->style(args)), state().paint_alpha_constant);
+    state().paint_color = color_with_alpha(TRY(state().paint_color_space->color(args)), state().paint_alpha_constant);
     return {};
 }
 
 RENDERER_HANDLER(set_stroking_color_and_space_to_rgb)
 {
     state().stroke_color_space = DeviceRGBColorSpace::the();
-    state().stroke_style = style_with_alpha(TRY(state().stroke_color_space->style(args)), state().stroke_alpha_constant);
+    state().stroke_color = color_with_alpha(TRY(state().stroke_color_space->color(args)), state().stroke_alpha_constant);
     return {};
 }
 
 RENDERER_HANDLER(set_painting_color_and_space_to_rgb)
 {
     state().paint_color_space = DeviceRGBColorSpace::the();
-    state().paint_style = style_with_alpha(TRY(state().paint_color_space->style(args)), state().paint_alpha_constant);
+    state().paint_color = color_with_alpha(TRY(state().paint_color_space->color(args)), state().paint_alpha_constant);
     return {};
 }
 
 RENDERER_HANDLER(set_stroking_color_and_space_to_cmyk)
 {
     state().stroke_color_space = TRY(DeviceCMYKColorSpace::the());
-    state().stroke_style = style_with_alpha(TRY(state().stroke_color_space->style(args)), state().stroke_alpha_constant);
+    state().stroke_color = color_with_alpha(TRY(state().stroke_color_space->color(args)), state().stroke_alpha_constant);
     return {};
 }
 
 RENDERER_HANDLER(set_painting_color_and_space_to_cmyk)
 {
     state().paint_color_space = TRY(DeviceCMYKColorSpace::the());
-    state().paint_style = style_with_alpha(TRY(state().paint_color_space->style(args)), state().paint_alpha_constant);
+    state().paint_color = color_with_alpha(TRY(state().paint_color_space->color(args)), state().paint_alpha_constant);
     return {};
 }
 
 RENDERER_HANDLER(shade)
 {
     VERIFY(args.size() == 1);
-    auto shading_name = MUST(m_document->resolve_to<NameObject>(args[0]))->name();
     auto resources = extra_resources.value_or(m_page.resources);
-    auto shading_resource_dict = TRY(resources->get_dict(m_document, CommonNames::Shading));
-    if (!shading_resource_dict->contains(shading_name)) {
-        dbgln("missing shade {}", shading_name);
-        return Error::malformed_error("Missing entry for shade name");
-    }
-
-    auto shading_dict_or_stream = TRY(shading_resource_dict->get_object(m_document, shading_name));
+    auto shading_dict_or_stream = TRY(get_resource(resources, CommonNames::Shading, args[0]));
     auto shading = TRY(Shading::create(m_document, shading_dict_or_stream, *this));
 
     Optional<ScopedState> scoped_state;
@@ -1054,15 +1086,7 @@ RENDERER_HANDLER(paint_xobject)
 {
     VERIFY(args.size() > 0);
     auto resources = extra_resources.value_or(m_page.resources);
-    if (!resources->contains(CommonNames::XObject))
-        return Error::malformed_error("XObject resource dictionary missing");
-
-    auto xobject_name = args[0].get<NonnullRefPtr<Object>>()->cast<NameObject>()->name();
-    auto xobjects_dict = TRY(resources->get_dict(m_document, CommonNames::XObject));
-    if (!xobjects_dict->contains(xobject_name))
-        return Error::malformed_error("XObject resource dictionary does not contain {}", xobject_name);
-
-    auto xobject = TRY(xobjects_dict->get_stream(m_document, xobject_name));
+    auto xobject = TRY(get_resource(resources, CommonNames::XObject, args[0]))->cast<StreamObject>();
     auto subtype = MUST(xobject->dict()->get_name(m_document, CommonNames::Subtype))->name();
     if (subtype == CommonNames::Image) {
         TRY(paint_image_xobject(xobject));
@@ -1344,12 +1368,12 @@ PDFErrorOr<void> Renderer::set_graphics_state_from_dict(NonnullRefPtr<DictObject
 
     if (dict->contains(CommonNames::CA) && m_rendering_preferences.use_constant_alpha) {
         state().stroke_alpha_constant = dict->get_value(CommonNames::CA).to_float();
-        state().stroke_style = style_with_alpha(state().stroke_style, state().stroke_alpha_constant);
+        state().stroke_color = color_with_alpha(state().stroke_color, state().stroke_alpha_constant);
     }
 
     if (dict->contains(CommonNames::ca) && m_rendering_preferences.use_constant_alpha) {
         state().paint_alpha_constant = dict->get_value(CommonNames::ca).to_float();
-        state().paint_style = style_with_alpha(state().paint_style, state().paint_alpha_constant);
+        state().paint_color = color_with_alpha(state().paint_color, state().paint_alpha_constant);
     }
 
     if (dict->contains(CommonNames::AIS)) // "alpha is shape"
@@ -1609,8 +1633,8 @@ PDFErrorOr<Renderer::LoadedImage> Renderer::load_image(NonnullRefPtr<StreamObjec
         auto bitmap = TRY(Gfx::Bitmap::create(Gfx::BitmapFormat::BGRA8888, { width, height }));
 
         Color colors[] = {
-            TRY(color_space->style({ &decode_array[0], 1 })).get<Color>(),
-            TRY(color_space->style({ &decode_array[1], 1 })).get<Color>(),
+            TRY(color_space->color({ &decode_array[0], 1 })),
+            TRY(color_space->color({ &decode_array[1], 1 })),
         };
 
         auto const bytes_per_line = ceil_div(width, 8);
@@ -1670,7 +1694,7 @@ PDFErrorOr<Renderer::LoadedImage> Renderer::load_image(NonnullRefPtr<StreamObjec
             sample = sample.slice(bytes_per_component);
             component_values[i] = component_value_decoders[i].interpolate(component[0]);
         }
-        auto color = TRY(color_space->style(component_values)).get<Color>();
+        auto color = TRY(color_space->color(component_values));
         bitmap->set_pixel(x, y, color);
         ++x;
         if (x == width) {
@@ -1788,11 +1812,11 @@ PDFErrorOr<void> Renderer::paint_image_xobject(NonnullRefPtr<StreamObject> image
         // PDF 1.7 spec, 4.8.5 Masked Images, Stencil Masking:
         // "An image mask (an image XObject whose ImageMask entry is true) [...] is treated as a stencil mask [...].
         //  Sample values [...] designate places on the page that should either be marked with the current color or masked out (not marked at all)."
-        if (!state().paint_style.has<Gfx::Color>())
+        if (!state().paint_color.has<Color>())
             return Error(Error::Type::RenderingUnsupported, "Image masks with pattern fill not yet implemented");
 
         // Move mask to alpha channel, and put current color in RGB.
-        auto current_color = state().paint_style.get<Gfx::Color>();
+        auto current_color = state().paint_color.get<Gfx::Color>();
         for (auto& pixel : *image_bitmap.bitmap) {
             // "a sample value of 0 marks the page with the current color, and a 1 leaves the previous contents unchanged."
             // That's opposite of the normal alpha convention, and we're upsampling masks to 8 bit and use that as normal alpha.
@@ -1835,17 +1859,13 @@ PDFErrorOr<NonnullRefPtr<ColorSpace>> Renderer::get_color_space_from_resources(V
             return ColorSpace::create(color_space_name, *this, resources);
         }
     }
-    auto color_space_resource_dict = TRY(resources->get_dict(m_document, CommonNames::ColorSpace));
-    if (!color_space_resource_dict->contains(color_space_name)) {
-        dbgln("missing key {}", color_space_name);
-        return Error::rendering_unsupported_error("Missing entry for color space name");
-    }
-    return get_color_space_from_document(TRY(color_space_resource_dict->get_object(m_document, color_space_name)));
+    auto color_space_object = TRY(get_resource(resources, CommonNames::ColorSpace, value));
+    return get_color_space_from_document(color_space_object, resources);
 }
 
-PDFErrorOr<NonnullRefPtr<ColorSpace>> Renderer::get_color_space_from_document(NonnullRefPtr<Object> color_space_object)
+PDFErrorOr<NonnullRefPtr<ColorSpace>> Renderer::get_color_space_from_document(NonnullRefPtr<Object> color_space_object, Optional<NonnullRefPtr<DictObject>> resources)
 {
-    return ColorSpace::create(m_document, color_space_object, *this);
+    return ColorSpace::create(m_document, color_space_object, *this, resources);
 }
 
 Gfx::AffineTransform const& Renderer::calculate_text_rendering_matrix() const

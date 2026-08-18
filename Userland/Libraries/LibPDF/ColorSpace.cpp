@@ -9,6 +9,7 @@
 #include <LibPDF/CommonNames.h>
 #include <LibPDF/Document.h>
 #include <LibPDF/ObjectDerivatives.h>
+#include <LibPDF/Pattern.h>
 #include <LibPDF/Renderer.h>
 
 namespace PDF {
@@ -45,7 +46,7 @@ PDFErrorOr<NonnullRefPtr<ColorSpace>> ColorSpace::create(Document* document, Non
     return Error { Error::Type::MalformedPDF, "Color space must be name or array" };
 }
 
-PDFErrorOr<NonnullRefPtr<ColorSpace>> ColorSpace::create(DeprecatedFlyString const& name, Renderer& renderer, Optional<NonnullRefPtr<DictObject>> extra_resources)
+PDFErrorOr<NonnullRefPtr<ColorSpace>> ColorSpace::create(DeprecatedFlyString const& name, Renderer&, Optional<NonnullRefPtr<DictObject>>)
 {
     // Simple color spaces with no parameters, which can be specified directly
     if (name == CommonNames::DeviceGray)
@@ -55,11 +56,11 @@ PDFErrorOr<NonnullRefPtr<ColorSpace>> ColorSpace::create(DeprecatedFlyString con
     if (name == CommonNames::DeviceCMYK)
         return TRY(DeviceCMYKColorSpace::the());
     if (name == CommonNames::Pattern)
-        return PatternColorSpace::create(renderer, extra_resources);
+        return PatternColorSpace::create();
     VERIFY_NOT_REACHED();
 }
 
-PDFErrorOr<NonnullRefPtr<ColorSpace>> ColorSpace::create(Document* document, NonnullRefPtr<ArrayObject> color_space_array, Renderer& renderer, Optional<NonnullRefPtr<DictObject>> extra_resources)
+PDFErrorOr<NonnullRefPtr<ColorSpace>> ColorSpace::create(Document* document, NonnullRefPtr<ArrayObject> color_space_array, Renderer& renderer, Optional<NonnullRefPtr<DictObject>>)
 {
     auto color_space_name = TRY(color_space_array->get_name_at(document, 0))->name();
 
@@ -90,7 +91,7 @@ PDFErrorOr<NonnullRefPtr<ColorSpace>> ColorSpace::create(Document* document, Non
         return TRY(SeparationColorSpace::create(document, move(parameters), renderer));
 
     if (color_space_name == CommonNames::Pattern)
-        return PatternColorSpace::create(renderer, extra_resources);
+        return PatternColorSpace::create();
 
     dbgln("Unknown color space: {}", color_space_name);
     return Error::rendering_unsupported_error("unknown color space");
@@ -102,7 +103,7 @@ NonnullRefPtr<DeviceGrayColorSpace> DeviceGrayColorSpace::the()
     return instance;
 }
 
-PDFErrorOr<ColorOrStyle> DeviceGrayColorSpace::style(ReadonlySpan<float> arguments) const
+PDFErrorOr<Color> DeviceGrayColorSpace::color(ReadonlySpan<float> arguments) const
 {
     VERIFY(arguments.size() == 1);
     auto gray = round_to<u8>(clamp(arguments[0] * 255.0f, 0.0f, 255.0f));
@@ -120,7 +121,7 @@ NonnullRefPtr<DeviceRGBColorSpace> DeviceRGBColorSpace::the()
     return instance;
 }
 
-PDFErrorOr<ColorOrStyle> DeviceRGBColorSpace::style(ReadonlySpan<float> arguments) const
+PDFErrorOr<Color> DeviceRGBColorSpace::color(ReadonlySpan<float> arguments) const
 {
     VERIFY(arguments.size() == 3);
     auto r = round_to<u8>(clamp(arguments[0] * 255.0f, 0.0f, 255.0f));
@@ -155,7 +156,7 @@ ErrorOr<NonnullRefPtr<DeviceCMYKColorSpace>> DeviceCMYKColorSpace::the()
     return instance;
 }
 
-PDFErrorOr<ColorOrStyle> DeviceCMYKColorSpace::style(ReadonlySpan<float> arguments) const
+PDFErrorOr<Color> DeviceCMYKColorSpace::color(ReadonlySpan<float> arguments) const
 {
     VERIFY(arguments.size() == 4);
 
@@ -219,7 +220,7 @@ DeviceNColorSpace::DeviceNColorSpace(NonnullRefPtr<ColorSpace> alternate_space, 
 {
 }
 
-PDFErrorOr<ColorOrStyle> DeviceNColorSpace::style(ReadonlySpan<float> arguments) const
+PDFErrorOr<Color> DeviceNColorSpace::color(ReadonlySpan<float> arguments) const
 {
     // FIXME: Does this need handling for the special colorant name "None"?
     // FIXME: When drawing to a printer, do something else.
@@ -229,7 +230,7 @@ PDFErrorOr<ColorOrStyle> DeviceNColorSpace::style(ReadonlySpan<float> arguments)
     for (size_t i = 0; i < tint_output.size(); ++i)
         m_tint_output_values[i] = tint_output[i];
 
-    return m_alternate_space->style(m_tint_output_values);
+    return m_alternate_space->color(m_tint_output_values);
 }
 
 int DeviceNColorSpace::number_of_components() const
@@ -368,7 +369,7 @@ PDFErrorOr<NonnullRefPtr<CalGrayColorSpace>> CalGrayColorSpace::create(Document*
     return color_space;
 }
 
-PDFErrorOr<ColorOrStyle> CalGrayColorSpace::style(ReadonlySpan<float> arguments) const
+PDFErrorOr<Color> CalGrayColorSpace::color(ReadonlySpan<float> arguments) const
 {
     VERIFY(arguments.size() == 1);
     auto a = clamp(arguments[0], 0.0f, 1.0f);
@@ -454,7 +455,7 @@ PDFErrorOr<NonnullRefPtr<CalRGBColorSpace>> CalRGBColorSpace::create(Document* d
     return color_space;
 }
 
-PDFErrorOr<ColorOrStyle> CalRGBColorSpace::style(ReadonlySpan<float> arguments) const
+PDFErrorOr<Color> CalRGBColorSpace::color(ReadonlySpan<float> arguments) const
 {
     VERIFY(arguments.size() == 3);
     auto a = clamp(arguments[0], 0.0f, 1.0f);
@@ -515,7 +516,7 @@ ICCBasedColorSpace::ICCBasedColorSpace(NonnullRefPtr<Gfx::ICC::Profile> profile)
     m_map = sRGB()->matrix_matrix_conversion(profile);
 }
 
-PDFErrorOr<ColorOrStyle> ICCBasedColorSpace::style(ReadonlySpan<float> arguments) const
+PDFErrorOr<Color> ICCBasedColorSpace::color(ReadonlySpan<float> arguments) const
 {
     if (m_profile->data_color_space() == Gfx::ICC::ColorSpace::CIELAB) {
         m_components.resize(arguments.size());
@@ -625,7 +626,7 @@ PDFErrorOr<NonnullRefPtr<LabColorSpace>> LabColorSpace::create(Document* documen
     return color_space;
 }
 
-PDFErrorOr<ColorOrStyle> LabColorSpace::style(ReadonlySpan<float> arguments) const
+PDFErrorOr<Color> LabColorSpace::color(ReadonlySpan<float> arguments) const
 {
     VERIFY(arguments.size() == 3);
     auto L_star = clamp(arguments[0], 0.0f, 100.0f);
@@ -731,11 +732,11 @@ IndexedColorSpace::IndexedColorSpace(NonnullRefPtr<ColorSpaceWithFloatArgs> base
 {
 }
 
-PDFErrorOr<ColorOrStyle> IndexedColorSpace::style(ReadonlySpan<float> arguments) const
+PDFErrorOr<Color> IndexedColorSpace::color(ReadonlySpan<float> arguments) const
 {
     VERIFY(arguments.size() == 1);
     auto index = static_cast<int>(arguments[0]);
-    return m_base->style(TRY(base_components(index)));
+    return m_base->color(TRY(base_components(index)));
 }
 
 Vector<float> IndexedColorSpace::default_decode() const
@@ -778,7 +779,7 @@ SeparationColorSpace::SeparationColorSpace(NonnullRefPtr<ColorSpace> alternate_s
 {
 }
 
-PDFErrorOr<ColorOrStyle> SeparationColorSpace::style(ReadonlySpan<float> arguments) const
+PDFErrorOr<Color> SeparationColorSpace::color(ReadonlySpan<float> arguments) const
 {
     // "For an additive device such as a computer display, a Separation color space never applies a process colorant directly;
     //  it always reverts to the alternate color space as described below."
@@ -795,127 +796,22 @@ PDFErrorOr<ColorOrStyle> SeparationColorSpace::style(ReadonlySpan<float> argumen
     for (size_t i = 0; i < tint_output.size(); ++i)
         m_tint_output_values[i] = tint_output[i];
 
-    return m_alternate_space->style(m_tint_output_values);
+    return m_alternate_space->color(m_tint_output_values);
 }
 
 Vector<float> SeparationColorSpace::default_decode() const
 {
     return { 0.0f, 1.0f };
 }
-NonnullRefPtr<PatternColorSpace> PatternColorSpace::create(Renderer& renderer, Optional<NonnullRefPtr<DictObject>> extra_resources)
+NonnullRefPtr<PatternColorSpace> PatternColorSpace::create()
 {
-    return adopt_ref(*new PatternColorSpace(renderer, extra_resources));
+    return adopt_ref(*new PatternColorSpace());
 }
 
-PDFErrorOr<ColorOrStyle> PatternColorSpace::style(ReadonlySpan<Value> arguments) const
+PDFErrorOr<Color> PatternColorSpace::color(ReadonlySpan<Value>) const
 {
-    VERIFY(arguments.size() >= 1);
-
-    auto resources = m_extra_resources.value_or(m_renderer.m_page.resources);
-    if (!resources->contains(CommonNames::Pattern))
-        return Error::malformed_error("Pattern resource dictionary missing");
-
-    auto pattern_resource = resources->get_value(CommonNames::Pattern);
-    auto* maybe_doc_pattern_dict = pattern_resource.get_pointer<NonnullRefPtr<Object>>();
-    if (!maybe_doc_pattern_dict || !(*maybe_doc_pattern_dict)->is<DictObject>())
-        return Error::malformed_error("Pattern resource dictionary not DictObject");
-
-    auto doc_pattern_dict = (*maybe_doc_pattern_dict)->cast<DictObject>();
-    auto const& pattern_name = arguments.last().get<NonnullRefPtr<Object>>()->cast<NameObject>()->name();
-    if (!doc_pattern_dict->contains(pattern_name))
-        return Error::malformed_error("Pattern dictionary does not contain pattern {}", pattern_name);
-
-    auto const pattern = TRY(m_renderer.m_document->resolve_to<Object>(doc_pattern_dict->get_value(pattern_name)));
-    NonnullRefPtr<DictObject> pattern_dict = [&] {
-        // Shading patterns do not have a content stream.
-        if (pattern->is<DictObject>())
-            return pattern->cast<DictObject>();
-        return pattern->cast<StreamObject>()->dict();
-    }();
-
-    // PatternType (Required) A code identifying the type of pattern that this dictionary describes;
-    // shall be 1 for a tiling pattern
-    auto const pattern_type = pattern_dict->get(CommonNames::PatternType)->get_u16();
-    if (pattern_type != 1)
-        return Error::rendering_unsupported_error("Unsupported pattern type {}", pattern_type);
-
-    // Type (Optional) The type of PDF object that this dictionary describes;
-    // if present, shall be Pattern for a pattern dictionary
-    auto const type = pattern_dict->get(CommonNames::Type);
-    if (type.has_value()) {
-        auto type_name = type->get<NonnullRefPtr<Object>>()->cast<NameObject>();
-        if (type_name->name() != CommonNames::Pattern)
-            return Error::rendering_unsupported_error("Unsupported pattern type {}", type_name->name());
-    }
-
-    // PaintType (Required) A code that determines how the colour of the pattern cell shall be specified
-    auto const pattern_paint_type = pattern_dict->get("PaintType")->get_u16();
-    if (pattern_paint_type != 1)
-        return Error::rendering_unsupported_error("Unsupported pattern paint type {}", pattern_paint_type);
-
-    // Matrix (Optional) An array of six numbers specifying the pattern matrix
-    Vector<Value> pattern_matrix;
-    if (pattern_dict->contains(CommonNames::Matrix)) {
-        pattern_matrix = pattern_dict->get_array(m_renderer.m_document, CommonNames::Matrix).value()->elements();
-    } else {
-        pattern_matrix = Vector { Value { 1 }, Value { 0 }, Value { 0 }, Value { 1 }, Value { 0 }, Value { 0 } };
-    }
-
-    auto pattern_bounding_box = pattern_dict->get_array(m_renderer.m_document, "BBox").value()->elements();
-    auto pattern_transform = Gfx::AffineTransform(
-        pattern_matrix[0].to_float(),
-        pattern_matrix[1].to_float(),
-        pattern_matrix[2].to_float(),
-        pattern_matrix[3].to_float(),
-        pattern_matrix[4].to_float(),
-        pattern_matrix[5].to_float());
-
-    // To get the device space size for the bitmap, apply the pattern transform to the pattern space bounding box, and then apply the initial ctm.
-    // NB: the pattern pattern_matrix maps pattern space to the default (initial) coordinate space of the page. (i.e cannot be updated via cm).
-
-    auto initial_ctm = Gfx::AffineTransform(m_renderer.m_graphics_state_stack.first().ctm);
-    initial_ctm.set_translation(0, 0);
-    initial_ctm.set_scale(initial_ctm.x_scale(), initial_ctm.y_scale());
-
-    auto pattern_space_lower_left = Gfx::FloatPoint { pattern_bounding_box[0].to_int(), pattern_bounding_box[1].to_int() };
-    auto pattern_space_upper_right = Gfx::FloatPoint { pattern_bounding_box[2].to_int(), pattern_bounding_box[3].to_int() };
-
-    auto device_space_lower_left = initial_ctm.map(pattern_transform.map(pattern_space_lower_left));
-    auto device_space_upper_right = initial_ctm.map(pattern_transform.map(pattern_space_upper_right));
-
-    auto bitmap_width = (int)device_space_upper_right.x() - (int)device_space_lower_left.x();
-    auto bitmap_height = (int)device_space_upper_right.y() - (int)device_space_lower_left.y();
-
-    auto pattern_cell = TRY(Gfx::Bitmap::create(Gfx::BitmapFormat::BGRA8888, { bitmap_width, bitmap_height }));
-    auto page = Page(m_renderer.m_page);
-    page.media_box = Rectangle {
-        pattern_space_lower_left.x(), pattern_space_lower_left.y(),
-        pattern_space_upper_right.x(), pattern_space_upper_right.y()
-    };
-    page.crop_box = page.media_box;
-
-    // (Required) A resource dictionary containing all of the named resources required by the pattern’s content stream.
-    // FIXME: This is technically required, but `patterns.pdf` omits it (and it is accepted by Chrome and FF/LibPDF.js).
-    Optional<NonnullRefPtr<DictObject>> pattern_resources {};
-    if (pattern_dict->contains(CommonNames::Resources))
-        pattern_resources = TRY(pattern_dict->get_dict(m_renderer.m_document, CommonNames::Resources));
-
-    auto pattern_renderer = Renderer(m_renderer.m_document, page, pattern_cell, {}, m_renderer.m_rendering_preferences);
-    auto operators = TRY(Parser::parse_operators(m_renderer.m_document, pattern->cast<StreamObject>()->bytes()));
-    for (auto& op : operators)
-        TRY(pattern_renderer.handle_operator(op, pattern_resources));
-
-    auto x_steps = pattern_dict->get("XStep").value_or(bitmap_width).to_int();
-    auto y_steps = pattern_dict->get("YStep").value_or(bitmap_height).to_int();
-
-    auto device_space_steps = initial_ctm.map(pattern_transform.map(Gfx::IntPoint { x_steps, y_steps }));
-
-    NonnullRefPtr<Gfx::PaintStyle> style = MUST(Gfx::RepeatingBitmapPaintStyle::create(
-        *pattern_cell,
-        device_space_steps,
-        {}));
-
-    return style;
+    // Not permitted
+    VERIFY_NOT_REACHED();
 }
 int PatternColorSpace::number_of_components() const
 {

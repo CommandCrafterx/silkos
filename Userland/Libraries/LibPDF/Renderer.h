@@ -21,6 +21,7 @@
 #include <LibPDF/Document.h>
 #include <LibPDF/Fonts/PDFFont.h>
 #include <LibPDF/Object.h>
+#include <LibPDF/Pattern.h>
 
 namespace PDF {
 
@@ -108,8 +109,8 @@ struct GraphicsState {
     ClippingState clipping_state;
     RefPtr<ColorSpace> stroke_color_space { DeviceGrayColorSpace::the() };
     RefPtr<ColorSpace> paint_color_space { DeviceGrayColorSpace::the() };
-    ColorOrStyle stroke_style { Color::Black };
-    ColorOrStyle paint_style { Color::Black };
+    Variant<Color, NonnullRefPtr<Pattern>> stroke_color { Color { Color::Black } };
+    Variant<Color, NonnullRefPtr<Pattern>> paint_color { Color { Color::Black } };
     ByteString color_rendering_intent { "RelativeColorimetric"sv };
     float flatness_tolerance { 1.0f };
     float line_width { 1.0f };
@@ -156,7 +157,8 @@ struct RenderingPreferences {
 };
 
 class Renderer {
-    friend class PatternColorSpace;
+    friend class Pattern;
+    friend class TilingPattern;
 
 public:
     static PDFErrorsOr<void> render(Document&, Page const&, RefPtr<Gfx::Bitmap>, Color background_color, RenderingPreferences preferences);
@@ -179,19 +181,19 @@ public:
 
     bool show_hidden_text() const { return m_rendering_preferences.show_hidden_text; }
 
-    static void fill_path_with_style(Gfx::AntiAliasingPainter& painter, Gfx::Path const& path, ColorOrStyle const& style, float paint_style_opacity = 1.0f, Gfx::WindingRule winding_rule = Gfx::WindingRule::Nonzero)
+    static void fill_path_with_color(Gfx::AntiAliasingPainter& painter, Gfx::Path const& path, Color const& color, Gfx::WindingRule winding_rule = Gfx::WindingRule::Nonzero)
     {
-        if (auto* paint_style = style.get_pointer<NonnullRefPtr<Gfx::PaintStyle>>()) {
-            painter.fill_path(path, *paint_style, paint_style_opacity, winding_rule);
-        } else {
-            painter.fill_path(path, style.get<Color>(), winding_rule);
-        }
+        painter.fill_path(path, color, winding_rule);
     }
+
+    Page const& page() const { return m_page; }
 
 private:
     Renderer(RefPtr<Document>, Page const&, RefPtr<Gfx::Bitmap>, Color background_color, RenderingPreferences);
 
     PDFErrorsOr<void> render();
+
+    PDFErrorOr<NonnullRefPtr<Object>> get_resource(NonnullRefPtr<DictObject> resources, ByteString const& resource_type, Value const& resource);
 
     PDFErrorOr<void> handle_operator(Operator const&, Optional<NonnullRefPtr<DictObject>> = {});
 #define V(name, snake_name, symbol) \
@@ -210,9 +212,10 @@ private:
 
     void begin_path_paint();
     PDFErrorOr<void> end_path_paint();
-    void stroke_current_path();
-    void fill_current_path(Gfx::WindingRule);
-    void fill_and_stroke_current_path(Gfx::WindingRule);
+    PDFErrorOr<void> fill_path_with_pattern(Gfx::Path const& path, NonnullRefPtr<Pattern> const& pattern, float opacity, Gfx::WindingRule winding_rule);
+    PDFErrorOr<void> stroke_current_path();
+    PDFErrorOr<void> fill_current_path(Gfx::WindingRule);
+    PDFErrorOr<void> fill_and_stroke_current_path(Gfx::WindingRule);
     PDFErrorOr<GraphicsState::SMask> read_smask_dict(NonnullRefPtr<DictObject> dict);
     PDFErrorOr<void> set_graphics_state_from_dict(NonnullRefPtr<DictObject>);
     PDFErrorOr<void> show_text(ByteString const&);
@@ -228,13 +231,13 @@ private:
     PDFErrorOr<void> paint_image_xobject(NonnullRefPtr<StreamObject>);
     void paint_empty_image(Gfx::IntSize);
     PDFErrorOr<NonnullRefPtr<ColorSpace>> get_color_space_from_resources(Value const&, NonnullRefPtr<DictObject>);
-    PDFErrorOr<NonnullRefPtr<ColorSpace>> get_color_space_from_document(NonnullRefPtr<Object>);
+    PDFErrorOr<NonnullRefPtr<ColorSpace>> get_color_space_from_document(NonnullRefPtr<Object>, Optional<NonnullRefPtr<DictObject>> = {});
 
-    static ColorOrStyle style_with_alpha(ColorOrStyle style, float alpha)
+    static Variant<Color, NonnullRefPtr<Pattern>> color_with_alpha(Variant<Color, NonnullRefPtr<Pattern>> color, float alpha)
     {
-        if (style.has<Color>())
-            return style.get<Color>().with_alpha(round_to<u8>(clamp(alpha * 255, 0, 255)));
-        return style;
+        if (!color.has<Color>())
+            return color;
+        return Color { color.get<Color>().with_alpha(round_to<u8>(clamp(alpha * 255, 0, 255))) };
     }
 
     ALWAYS_INLINE GraphicsState& state() { return m_graphics_state_stack.last(); }
@@ -290,6 +293,7 @@ private:
     };
     AddPathAsClip m_add_path_as_clip { AddPathAsClip::No };
 
+    Gfx::AffineTransform m_userspace_matrix;
     Vector<GraphicsState> m_graphics_state_stack;
     Gfx::AffineTransform m_text_matrix;
     Gfx::AffineTransform m_text_line_matrix;
@@ -302,8 +306,6 @@ private:
     // Only used for m_rendering_preferences.show_clipping_paths.
     void show_clipping_paths();
     Vector<Gfx::Path> m_clip_paths_to_show_for_debugging;
-    // Used to offset the PaintStyle's origin when rendering a pattern.
-    RefPtr<Gfx::PaintStyle> m_original_paint_style;
 };
 
 }
@@ -419,16 +421,16 @@ struct Formatter<PDF::GraphicsState> : Formatter<StringView> {
         StringBuilder builder;
         builder.append("GraphicsState {\n"sv);
         builder.appendff("  ctm={}\n", state.ctm);
-        if (state.stroke_style.has<Color>()) {
-            builder.appendff("  stroke_style={}\n", state.stroke_style.get<Color>());
-        } else {
-            builder.appendff("  stroke_style={}\n", state.stroke_style.get<NonnullRefPtr<Gfx::PaintStyle>>());
-        }
-        if (state.paint_style.has<Color>()) {
-            builder.appendff("  paint_style={}\n", state.paint_style.get<Color>());
-        } else {
-            builder.appendff("  paint_style={}\n", state.paint_style.get<NonnullRefPtr<Gfx::PaintStyle>>());
-        }
+        state.stroke_color.visit(
+            [&](Gfx::Color const& color) {
+                builder.appendff("  stroke_color={}\n", color);
+            },
+            [&](NonnullRefPtr<PDF::Pattern> const&) { builder.appendff("  stroke_color=pattern\n"); });
+        state.paint_color.visit(
+            [&](Gfx::Color const& color) {
+                builder.appendff("  paint_color={}\n", color);
+            },
+            [&](NonnullRefPtr<PDF::Pattern> const&) { builder.appendff("  paint_color=pattern\n"); });
         builder.appendff("  color_rendering_intent={}\n", state.color_rendering_intent);
         builder.appendff("  flatness_tolerance={}\n", state.flatness_tolerance);
         builder.appendff("  line_width={}\n", state.line_width);

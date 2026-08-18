@@ -7,6 +7,7 @@
 #pragma once
 
 #include <AK/Atomic.h>
+#include <AK/Fences.h>
 #include <Kernel/Arch/Processor.h>
 
 namespace Kernel {
@@ -68,7 +69,7 @@ public:
             }
         }
 
-        AK::atomic_thread_fence(AK::memory_order_release);
+        atomic_thread_fence(AK::memory_order_release);
 
         if (expected == 1 << 1) {
             last_ref_action();

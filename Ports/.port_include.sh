@@ -168,7 +168,7 @@ get_new_config_sub() {
         exit 1
     fi
     if ! run grep -q serenity "$config_sub"; then
-        run do_download_file "https://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.sub" "${config_sub}" false
+        run do_download_file "https://cgit.git.savannah.gnu.org/cgit/config.git/plain/config.sub" "${config_sub}" false
     fi
 }
 
@@ -179,7 +179,7 @@ get_new_config_guess() {
         exit 1
     fi
     if ! run grep -q SerenityOS "$config_guess"; then
-        run do_download_file "https://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.guess" "${config_guess}" false
+        run do_download_file "https://cgit.git.savannah.gnu.org/cgit/config.git/plain/config.guess" "${config_guess}" false
     fi
 }
 
@@ -314,7 +314,7 @@ do_download_file() {
     echo "Downloading URL: ${url}"
 
     if which curl; then
-        run_nocd curl ${curlopts:-} "$url" -L -o "$filename"
+        run_nocd curl ${curlopts:-} "$url" --fail -L -o "$filename"
     else
         run_nocd pro "$url" > "$filename"
     fi
@@ -361,7 +361,7 @@ fetch_simple() {
                 run touch ".${filename}_extracted"
                 ;;
             *.zip)
-                run_nocd bsdtar xf "${PORT_META_DIR}/${filename}" || run_nocd unzip -qo "${PORT_META_DIR}/${filename}"
+                run_nocd unzip -qo "${PORT_META_DIR}/${filename}" || run_nocd bsdtar xf "${PORT_META_DIR}/${filename}"
                 run touch ".${filename}_extracted"
                 ;;
             *.exe|*.htm)

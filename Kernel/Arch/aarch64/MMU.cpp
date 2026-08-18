@@ -29,10 +29,6 @@ extern u8 end_of_kernel_image[];
 
 namespace Kernel::Memory {
 
-// physical memory
-constexpr u32 START_OF_NORMAL_MEMORY = 0x00000000;
-constexpr u32 END_OF_NORMAL_MEMORY = 0x3EFFFFFF;
-
 ALWAYS_INLINE static u64* descriptor_to_pointer(FlatPtr descriptor)
 {
     return (u64*)(descriptor & DESCRIPTOR_MASK);
@@ -93,18 +89,6 @@ static UNMAP_AFTER_INIT FlatPtr calculate_physical_to_link_time_address_offset()
     return KERNEL_MAPPING_BASE - physical_address;
 }
 
-// NOTE: To access global variables while the MMU is not yet enabled, we need
-//       to convert the address of a global variable to a physical address by
-//       subtracting calculate_physical_to_link_time_address_offset(). This is because the kernel is linked
-//       for virtual memory at KERNEL_MAPPING_BASE, so a regular access to global variables
-//       will use the high virtual memory address. This does not work when the MMU is not yet
-//       enabled, so this function must be used for accessing global variables.
-template<typename T>
-inline T* adjust_by_mapping_base(T* ptr)
-{
-    return (T*)((FlatPtr)ptr - calculate_physical_to_link_time_address_offset());
-}
-
 static u64* insert_page_table(PageBumpAllocator& allocator, u64* page_table, VirtualAddress virtual_addr)
 {
     // Each level has 9 bits (512 entries)
@@ -156,24 +140,20 @@ static void setup_quickmap_page_table(PageBumpAllocator& allocator, u64* root_ta
 {
     // FIXME: Rename boot_pd_kernel_pt1023 to quickmap_page_table
     // FIXME: Rename KERNEL_PT1024_BASE to quickmap_page_table_address
-    auto kernel_pt1024_base = VirtualAddress(*adjust_by_mapping_base(&g_boot_info.kernel_mapping_base) + KERNEL_PT1024_OFFSET);
+    auto kernel_pt1024_base = VirtualAddress(g_boot_info.kernel_mapping_base + KERNEL_PT1024_OFFSET);
 
     auto quickmap_page_table = PhysicalAddress((PhysicalPtr)insert_page_table(allocator, root_table, kernel_pt1024_base));
-    *adjust_by_mapping_base(&g_boot_info.boot_pd_kernel_pt1023) = (PageTableEntry*)quickmap_page_table.offset(calculate_physical_to_link_time_address_offset()).get();
+    g_boot_info.boot_pd_kernel_pt1023 = (PageTableEntry*)quickmap_page_table.offset(calculate_physical_to_link_time_address_offset()).get();
 }
 
 static void build_mappings(PageBumpAllocator& allocator, u64* root_table)
 {
     u64 normal_memory_flags = ACCESS_FLAG | PAGE_DESCRIPTOR | INNER_SHAREABLE | NORMAL_MEMORY;
 
-    // Align the identity mapping of the kernel image to 2 MiB, the rest of the memory is initially not mapped.
-    auto start_of_kernel_range = VirtualAddress((FlatPtr)start_of_kernel_image & ~(FlatPtr)0x1fffff);
-    auto end_of_kernel_range = VirtualAddress(((FlatPtr)end_of_kernel_image & ~(FlatPtr)0x1fffff) + 0x200000 - 1);
+    auto start_of_kernel_range = VirtualAddress { KERNEL_MAPPING_BASE };
+    auto end_of_kernel_range = start_of_kernel_range.offset((+end_of_kernel_image) - (+start_of_kernel_image));
 
-    auto start_of_physical_kernel_range = PhysicalAddress(start_of_kernel_range.get()).offset(-calculate_physical_to_link_time_address_offset());
-
-    // Insert identity mapping
-    insert_entries_for_memory_range(allocator, root_table, start_of_kernel_range.offset(-calculate_physical_to_link_time_address_offset()), end_of_kernel_range.offset(-calculate_physical_to_link_time_address_offset()), start_of_physical_kernel_range, normal_memory_flags);
+    auto start_of_physical_kernel_range = PhysicalAddress { bit_cast<PhysicalPtr>(+start_of_kernel_image) };
 
     // Map kernel into high virtual memory
     insert_entries_for_memory_range(allocator, root_table, start_of_kernel_range, end_of_kernel_range, start_of_physical_kernel_range, normal_memory_flags);
@@ -185,7 +165,7 @@ static void switch_to_page_table(u8* page_table)
     Aarch64::Asm::set_ttbr1_el1((FlatPtr)page_table);
 }
 
-static void activate_mmu()
+static void configure_mmu()
 {
     Aarch64::MAIR_EL1 mair_el1 = {};
     mair_el1.Attr[0] = 0xFF;       // Normal memory
@@ -214,15 +194,6 @@ static void activate_mmu()
     tcr_el1.IPS = feature_register.PARange;
 
     Aarch64::TCR_EL1::write(tcr_el1);
-
-    // Enable MMU in the system control register
-    Aarch64::SCTLR_EL1 sctlr_el1 = Aarch64::SCTLR_EL1::read();
-    sctlr_el1.M = 1; // Enable MMU
-    sctlr_el1.C = 1; // Enable data cache
-    sctlr_el1.I = 1; // Enable instruction cache
-    Aarch64::SCTLR_EL1::write(sctlr_el1);
-
-    Aarch64::Asm::flush();
 }
 
 static u64* get_page_directory(u64* root_table, VirtualAddress virtual_addr)
@@ -256,20 +227,70 @@ static u64* get_page_directory_table(u64* root_table, VirtualAddress virtual_add
 
 static void setup_kernel_page_directory(u64* root_table)
 {
-    auto kernel_page_directory = (PhysicalPtr)get_page_directory(root_table, VirtualAddress { *adjust_by_mapping_base(&g_boot_info.kernel_mapping_base) });
+    auto kernel_page_directory = (PhysicalPtr)get_page_directory(root_table, VirtualAddress { g_boot_info.kernel_mapping_base });
     if (!kernel_page_directory)
         panic_without_mmu("Could not find kernel page directory!"sv);
 
-    *adjust_by_mapping_base(&g_boot_info.boot_pd_kernel) = PhysicalAddress(kernel_page_directory);
+    g_boot_info.boot_pd_kernel = PhysicalAddress(kernel_page_directory);
 
     // FIXME: Rename boot_pml4t to something architecture agnostic.
-    *adjust_by_mapping_base(&g_boot_info.boot_pml4t) = PhysicalAddress((PhysicalPtr)root_table);
+    g_boot_info.boot_pml4t = PhysicalAddress((PhysicalPtr)root_table);
 
     // FIXME: Rename to directory_table or similar
-    *adjust_by_mapping_base(&g_boot_info.boot_pdpt) = PhysicalAddress((PhysicalPtr)get_page_directory_table(root_table, VirtualAddress { *adjust_by_mapping_base(&g_boot_info.kernel_mapping_base) }));
+    g_boot_info.boot_pdpt = PhysicalAddress((PhysicalPtr)get_page_directory_table(root_table, VirtualAddress { g_boot_info.kernel_mapping_base }));
 }
 
-void init_page_tables(PhysicalPtr flattened_devicetree_paddr)
+// This function has to fit into one page as it will be identity mapped.
+[[gnu::aligned(PAGE_SIZE)]] [[noreturn]] UNMAP_AFTER_INIT static void activate_mmu(BootInfo const& info, u64* activate_mmu_pte)
+{
+    // Enable the MMU. This will immediately take effect, but we won't crash as this function is identity mapped.
+    auto offset = calculate_physical_to_link_time_address_offset();
+    register FlatPtr x0 asm("x0") = bit_cast<FlatPtr>(&info) + offset;
+    asm volatile(
+        R"(
+            // Invalidate the TLBs before enabling the MMU, as the TLBs might still contain old values.
+            tlbi vmalle1
+            dsb ish
+            isb
+
+            // Enable the MMU, data cache, and instruction cache.
+            mrs x1, sctlr_el1
+            mov w2, #(1 << 0) | (1 << 2) | (1 << 12)
+            orr x1, x1, x2
+            msr sctlr_el1, x1
+            isb
+
+            // Continue execution at high virtual address.
+            adrp x1, 1f
+            add x1, x1, :lo12:1f
+            add x1, x1, %[offset]
+            br x1
+        1:
+
+            // Add offset to the stack pointer, such that it is also using the mapping in high virtual memory.
+            add sp, sp, %[offset]
+
+            // Zero the PTE which identity maps this function.
+            add x1, %[activate_mmu_pte], %[offset]
+            str xzr, [x1]
+            dsb ishst
+            tlbi vmalle1
+            dsb ish
+            isb
+
+            mov lr, xzr
+            mov fp, xzr
+
+            b init
+        )"
+        :
+        : "r"(x0), [offset] "r"(offset), [activate_mmu_pte] "r"(activate_mmu_pte)
+        : "x1", "x2", "memory");
+
+    VERIFY_NOT_REACHED();
+}
+
+[[noreturn]] void init_page_tables_and_jump_to_init(PhysicalPtr flattened_devicetree_paddr)
 {
     ::DeviceTree::FlattenedDeviceTreeHeader* fdt_header = bit_cast<::DeviceTree::FlattenedDeviceTreeHeader*>(flattened_devicetree_paddr);
     if (fdt_header->magic != 0xd00dfeed)
@@ -281,46 +302,36 @@ void init_page_tables(PhysicalPtr flattened_devicetree_paddr)
         panic_without_mmu("Passed FDT is bigger than the internal storage"sv);
     for (size_t o = 0; o < fdt_header->totalsize; o += 1) {
         // FIXME: Maybe increase the IO size here
-        adjust_by_mapping_base(DeviceTree::s_fdt_storage)[o] = fdt_storage[o];
+        DeviceTree::s_fdt_storage[o] = fdt_storage[o];
     }
 
-    *adjust_by_mapping_base(&g_boot_info.boot_method) = BootMethod::PreInit;
+    g_boot_info.boot_method = BootMethod::PreInit;
 
-    *adjust_by_mapping_base(&g_boot_info.flattened_devicetree_paddr) = PhysicalAddress { flattened_devicetree_paddr };
-    *adjust_by_mapping_base(&g_boot_info.flattened_devicetree_size) = fdt_header->totalsize;
-    *adjust_by_mapping_base(&g_boot_info.physical_to_virtual_offset) = calculate_physical_to_link_time_address_offset();
-    *adjust_by_mapping_base(&g_boot_info.kernel_mapping_base) = KERNEL_MAPPING_BASE;
-    *adjust_by_mapping_base(&g_boot_info.kernel_load_base) = KERNEL_MAPPING_BASE;
+    g_boot_info.flattened_devicetree_paddr = PhysicalAddress { flattened_devicetree_paddr };
+    g_boot_info.flattened_devicetree_size = fdt_header->totalsize;
+    g_boot_info.physical_to_virtual_offset = calculate_physical_to_link_time_address_offset();
+    g_boot_info.kernel_mapping_base = KERNEL_MAPPING_BASE;
+    g_boot_info.kernel_load_base = KERNEL_MAPPING_BASE;
 
-    PageBumpAllocator allocator(adjust_by_mapping_base((u64*)page_tables_phys_start), adjust_by_mapping_base((u64*)page_tables_phys_end));
+    PageBumpAllocator allocator((u64*)page_tables_phys_start, (u64*)page_tables_phys_end);
     auto root_table = allocator.take_page();
     build_mappings(allocator, root_table);
     setup_quickmap_page_table(allocator, root_table);
     setup_kernel_page_directory(root_table);
 
-    switch_to_page_table(adjust_by_mapping_base(page_tables_phys_start));
-    activate_mmu();
-}
+    // Identity map the `activate_mmu` function and save the level 3 table address in order to remove the identity mapping in `activate_mmu` again.
+    auto const activate_mmu_vaddr = VirtualAddress { bit_cast<FlatPtr>(&activate_mmu) };
+    auto const activate_mmu_paddr = PhysicalAddress { bit_cast<PhysicalPtr>(&activate_mmu) };
 
-void unmap_identity_map()
-{
-    auto start_of_physical_memory = FlatPtr(START_OF_NORMAL_MEMORY);
+    u64* activate_mmu_level3_table = insert_page_table(allocator, root_table, activate_mmu_vaddr);
 
-    u64 level0_idx = (start_of_physical_memory >> 39) & 0x1FF;
-    u64 level1_idx = (start_of_physical_memory >> 30) & 0x1FF;
+    size_t activate_mmu_level3_index = (activate_mmu_vaddr.get() >> 12) & 0x1ff;
+    activate_mmu_level3_table[activate_mmu_level3_index] = activate_mmu_paddr.get();
+    activate_mmu_level3_table[activate_mmu_level3_index] |= ACCESS_FLAG | PAGE_DESCRIPTOR | INNER_SHAREABLE | NORMAL_MEMORY;
 
-    u64* level1_table = (u64*)page_tables_phys_start;
-
-    auto level2_table = FlatPtr(descriptor_to_pointer(level1_table[level0_idx]));
-    if (!level2_table)
-        panic_without_mmu("Could not find table!"sv);
-
-    // NOTE: The function descriptor_to_pointer returns a physical address, but we want to unmap that range
-    //       so, the pointer must be converted to a virtual address by adding calculate_physical_to_link_time_address_offset().
-    level2_table += calculate_physical_to_link_time_address_offset();
-
-    // Unmap the complete identity map
-    ((u64*)level2_table)[level1_idx] = 0;
+    switch_to_page_table(page_tables_phys_start);
+    configure_mmu();
+    activate_mmu(g_boot_info, &activate_mmu_level3_table[activate_mmu_level3_index]);
 }
 
 }
