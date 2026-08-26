@@ -11,6 +11,7 @@
 #include <AK/StdLibExtras.h>
 #include <AK/Types.h>
 #include <Kernel/API/SyscallString.h>
+#include <Kernel/API/VirtualMemoryAnnotations.h>
 #include <Kernel/API/prctl_numbers.h>
 #include <LibCore/ArgsParser.h>
 #include <LibCore/File.h>
@@ -221,6 +222,9 @@ HANDLE(PR_SET_PROCESS_NAME)
 HANDLE(PR_GET_PROCESS_NAME)
 HANDLE(PR_SET_THREAD_NAME)
 HANDLE(PR_GET_THREAD_NAME)
+HANDLE(PR_SET_NO_TRANSITION_TO_EXECUTABLE_FROM_WRITABLE_PROT)
+HANDLE(PR_SET_JAILED_UNTIL_EXIT)
+HANDLE(PR_SET_JAILED_UNTIL_EXEC)
 END_VALUES_TO_NAMES()
 
 static int g_pid = -1;
@@ -492,6 +496,12 @@ private:
     bool m_first_arg { true };
 };
 
+static void format_getcwd(FormattedSyscallBuilder& builder, char* buffer, int rc)
+{
+    if (rc > 0)
+        builder.add_arguments(StringArgument { { buffer, static_cast<size_t>(rc) } });
+}
+
 static void format_getrandom(FormattedSyscallBuilder& builder, void* buffer, size_t size, unsigned flags)
 {
     builder.add_arguments(buffer, size, flags);
@@ -593,6 +603,18 @@ struct Formatter<struct stat> : StandardFormatter {
         return {};
     }
 };
+}
+
+struct VirtualMemoryAnnotation : BitflagBase {
+    static constexpr auto options = {
+        BitflagOption { to_underlying(Kernel::VirtualMemoryRangeFlags::SyscallCode), "SyscallCode"sv },
+        BitflagOption { to_underlying(Kernel::VirtualMemoryRangeFlags::Immutable), "Immutable"sv },
+    };
+};
+
+static void format_annotate_mapping(FormattedSyscallBuilder& builder, void const* address, int flags)
+{
+    builder.add_arguments(address, VirtualMemoryAnnotation { flags });
 }
 
 static void format_chdir(FormattedSyscallBuilder& builder, char const* path_p, size_t length)
@@ -712,6 +734,14 @@ static ErrorOr<void> format_symlink(FormattedSyscallBuilder& builder, Syscall::S
     return {};
 }
 
+static void format_unlink(FormattedSyscallBuilder& builder, int dir_fd, char const* path, size_t path_length, int flags)
+{
+    builder.add_arguments(
+        DirFDArgument { dir_fd },
+        StringArgument { { path, path_length } },
+        flags);
+}
+
 static void format_connect(FormattedSyscallBuilder& builder, int socket, const struct sockaddr* address_p, socklen_t address_len)
 {
     builder.add_arguments(socket, copy_from_process(address_p).release_value_but_fixme_should_propagate_errors(), address_len);
@@ -824,8 +854,16 @@ static void format_prctl(FormattedSyscallBuilder& builder, int option, size_t ar
     case PR_SET_NO_NEW_SYSCALL_REGION_ANNOTATIONS:
         builder.add_argument((bool)arg1);
         break;
+    case PR_GET_PROCESS_NAME:
+    case PR_GET_THREAD_NAME:
+        if ((char*)arg1 && arg2 > 0)
+            builder.add_arguments(StringArgument { { (char*)arg1, arg2 } });
+        break;
     case PR_GET_DUMPABLE:
     case PR_GET_NO_NEW_SYSCALL_REGION_ANNOTATIONS:
+    case PR_SET_NO_TRANSITION_TO_EXECUTABLE_FROM_WRITABLE_PROT:
+    case PR_SET_JAILED_UNTIL_EXIT:
+    case PR_SET_JAILED_UNTIL_EXEC:
         break;
     default:
         builder.add_arguments(arg1, arg2, arg3);
@@ -836,6 +874,9 @@ static void format_prctl(FormattedSyscallBuilder& builder, int option, size_t ar
 static ErrorOr<void> format_syscall_early(FormattedSyscallBuilder& builder, Syscall::Function syscall_function, syscall_arg_t arg1, syscall_arg_t arg2, syscall_arg_t arg3, [[maybe_unused]] syscall_arg_t arg4)
 {
     switch (syscall_function) {
+    case SC_annotate_mapping:
+        format_annotate_mapping(builder, (void const*)arg1, (int)arg2);
+        break;
     case SC_chdir:
         format_chdir(builder, (char const*)arg1, (size_t)arg2);
         break;
@@ -875,6 +916,9 @@ static ErrorOr<void> format_syscall_early(FormattedSyscallBuilder& builder, Sysc
     case SC_open:
         TRY(format_open(builder, (Syscall::SC_open_params*)arg1));
         break;
+    case SC_pledge:
+        TRY(format_pledge(builder, (Syscall::SC_pledge_params*)arg1));
+        break;
     case SC_rename:
         TRY(format_rename(builder, (Syscall::SC_rename_params*)arg1));
         break;
@@ -884,8 +928,8 @@ static ErrorOr<void> format_syscall_early(FormattedSyscallBuilder& builder, Sysc
     case SC_symlink:
         TRY(format_symlink(builder, (Syscall::SC_symlink_params*)arg1));
         break;
-    case SC_pledge:
-        TRY(format_pledge(builder, (Syscall::SC_pledge_params*)arg1));
+    case SC_unlink:
+        format_unlink(builder, (int)arg1, (char const*)arg2, (size_t)arg3, (int)arg4);
         break;
     case SC_write:
         format_write(builder, (int)arg1, (void*)arg2, (size_t)arg3);
@@ -897,6 +941,7 @@ static ErrorOr<void> format_syscall_early(FormattedSyscallBuilder& builder, Sysc
     case SC_getpid:
     case SC_getppid:
     case SC_gettid:
+    case SC_map_time_page:
         // These syscalls don't take arguments.
         break;
     case SC_connect:
@@ -904,6 +949,7 @@ static ErrorOr<void> format_syscall_early(FormattedSyscallBuilder& builder, Sysc
     case SC_dbgputstr:
     case SC_fstat:
     case SC_getrandom:
+    case SC_getcwd:
     case SC_ioctl:
     case SC_poll:
     case SC_prctl:
@@ -930,6 +976,7 @@ static void format_result(FormattedSyscallBuilder& builder, Syscall::Function sy
     case SC_write:
         builder.format_result((ssize_t)res);
         break;
+    case SC_map_time_page:
     case SC_mmap:
         builder.format_result((void*)res);
         break;
@@ -956,6 +1003,9 @@ static ErrorOr<void> format_syscall_final(FormattedSyscallBuilder& builder, Sysc
         break;
     case SC_fstat:
         format_fstat(builder, (int)arg1, (struct stat*)arg2);
+        break;
+    case SC_getcwd:
+        format_getcwd(builder, (char*)arg1, (int)res);
         break;
     case SC_getrandom:
         format_getrandom(builder, (void*)arg1, (size_t)arg2, (unsigned)arg3);

@@ -177,6 +177,8 @@ public:
 
     Gfx::AffineTransform const& calculate_text_rendering_matrix() const;
 
+    bool needs_vector_glyphs_for_current_text() const;
+    PDFErrorOr<void> paint_text_glyphs(Gfx::Path const&);
     PDFErrorOr<void> render_type3_glyph(Gfx::FloatPoint, StreamObject const&, Gfx::AffineTransform const&, Optional<NonnullRefPtr<DictObject>>);
 
     bool show_hidden_text() const { return m_rendering_preferences.show_hidden_text; }
@@ -213,8 +215,11 @@ private:
     void begin_path_paint();
     PDFErrorOr<void> end_path_paint();
     PDFErrorOr<void> fill_path_with_pattern(Gfx::Path const& path, NonnullRefPtr<Pattern> const& pattern, float opacity, Gfx::WindingRule winding_rule);
+    PDFErrorOr<void> stroke_path(Gfx::Path const&);
     PDFErrorOr<void> stroke_current_path();
+    PDFErrorOr<void> fill_path(Gfx::Path const&, Gfx::WindingRule);
     PDFErrorOr<void> fill_current_path(Gfx::WindingRule);
+    PDFErrorOr<void> fill_and_stroke_path(Gfx::Path const&, Gfx::WindingRule);
     PDFErrorOr<void> fill_and_stroke_current_path(Gfx::WindingRule);
     PDFErrorOr<GraphicsState::SMask> read_smask_dict(NonnullRefPtr<DictObject> dict);
     PDFErrorOr<void> set_graphics_state_from_dict(NonnullRefPtr<DictObject>);
@@ -295,6 +300,7 @@ private:
 
     Gfx::AffineTransform m_userspace_matrix;
     Vector<GraphicsState> m_graphics_state_stack;
+    Gfx::Path m_clip_from_text;
     Gfx::AffineTransform m_text_matrix;
     Gfx::AffineTransform m_text_line_matrix;
 

@@ -7,13 +7,11 @@
 #pragma once
 
 #include <AK/ByteString.h>
+#include <LibCore/Forward.h>
 #include <LibSSH/DataTypes.h>
 
 namespace SSH::Server {
 
-// FIXME: This generates a brand new host key every single time
-//        a server is started. We should store in on the disk to
-//        make it persistent.
 class ServerConfiguration {
 public:
     static ServerConfiguration& the();
@@ -34,14 +32,16 @@ public:
     void set_keylog_file(StringView path) { m_keylog_file = path; }
     Optional<ByteString> keylog_file() const { return m_keylog_file; }
 
-    ErrorOr<Vector<TypedBlob>> get_authorized_keys_for_user() const;
+    ErrorOr<Vector<TypedBlob>> get_authorized_keys_for_user(Core::Account const&) const;
 
 private:
-    ErrorOr<StringView> user_authorized_keys_file() const;
+    ErrorOr<StringView> user_authorized_keys_file(Core::Account const&) const;
+
+    void ensure_ssh_ed25519_keys() const;
+    ErrorOr<void> load_server_keys_from_file() const;
 
     mutable TypedBlob m_ssh_ed25519_server_public_key;
     mutable TypedBlob m_ssh_ed25519_server_private_key;
-    void ensure_ssh_ed25519_keys() const;
 
     bool m_use_unsafe_stubbed_private_key { false };
 

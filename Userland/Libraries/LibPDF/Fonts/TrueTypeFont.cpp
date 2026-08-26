@@ -143,13 +143,14 @@ PDFErrorOr<void> TrueTypePainter::draw_glyph(Gfx::Painter& painter, Gfx::FloatPo
                 return {};
             },
             [&](NonnullRefPtr<Pattern> const&) -> PDFErrorOr<void> {
-                return Error::rendering_unsupported_error("Cannot draw TrueType glyph with a pattern yet");
+                // Renderer::needs_vector_glyphs_for_current_text() should always return true for pattern text fills.
+                VERIFY_NOT_REACHED();
             }));
     }
     return {};
 }
 
-PDFErrorOr<void> TrueTypePainter::append_glyph_path(Gfx::Path& path, Gfx::FloatPoint point, u8 char_code, Renderer const&)
+PDFErrorOr<void> TrueTypePainter::append_glyph_path(Gfx::Path& path, Gfx::FloatPoint point, u8 char_code)
 {
     auto glyph_id = TRY(resolve_glyph_id_for_char_code(char_code));
     if (glyph_id.has_value()) {
@@ -219,9 +220,9 @@ PDFErrorOr<void> TrueTypeFont::draw_glyph(Gfx::Painter& painter, Gfx::FloatPoint
     return m_font_painter->draw_glyph(painter, point, char_code, renderer);
 }
 
-PDFErrorOr<void> TrueTypeFont::append_glyph_path(Gfx::Path& path, Gfx::FloatPoint point, u8 char_code, Renderer const& renderer)
+PDFErrorOr<void> TrueTypeFont::append_glyph_path(Gfx::Path& path, Gfx::FloatPoint point, float, u8 char_code)
 {
-    return m_font_painter->append_glyph_path(path, point, char_code, renderer);
+    return m_font_painter->append_glyph_path(path, point, char_code);
 }
 
 }

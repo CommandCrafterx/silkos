@@ -11,6 +11,7 @@
 #include <AK/ScopeGuard.h>
 #include <LibCore/Account.h>
 #include <LibCore/Directory.h>
+#include <LibCore/Environment.h>
 #include <LibCore/System.h>
 #include <LibCore/UmaskScope.h>
 #include <errno.h>
@@ -180,7 +181,14 @@ ErrorOr<void> Account::login() const
     TRY(Core::System::setgid(m_gid));
     TRY(Core::System::setuid(m_uid));
 
+    TRY(Core::Environment::set("HOME"sv, m_home_directory, Core::Environment::Overwrite::Yes));
+
     return {};
+}
+
+bool Account::is_self() const
+{
+    return getuid() == m_uid;
 }
 
 ErrorOr<void> Account::set_password(SecretString const& password)

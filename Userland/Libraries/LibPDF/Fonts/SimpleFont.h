@@ -20,7 +20,7 @@ protected:
     virtual Optional<float> get_glyph_width(u8 char_code) const = 0;
     virtual PDFErrorOr<void> draw_glyph(Gfx::Painter& painter, Gfx::FloatPoint point, float width, u8 char_code, Renderer const&) = 0;
 
-    virtual PDFErrorOr<void> append_glyph_path(Gfx::Path&, Gfx::FloatPoint, u8, Renderer const&)
+    virtual PDFErrorOr<void> append_glyph_path(Gfx::Path&, Gfx::FloatPoint, float, u8)
     {
         return Error { Error::Type::RenderingUnsupported, "append_glyph_path not implemented for font" };
     }
@@ -35,7 +35,7 @@ private:
     PDFErrorOr<Gfx::FloatPoint> for_each_glyph_position(Gfx::FloatPoint, ByteString const&, Renderer const&, Callback callback);
 
     PDFErrorOr<Gfx::FloatPoint> append_text_path(Gfx::Path&, Gfx::FloatPoint, ByteString const&, Renderer const&);
-    PDFErrorOr<Gfx::FloatPoint> draw_transformed_glyphs(Gfx::Painter&, Gfx::FloatPoint, ByteString const&, Renderer const&);
+    PDFErrorOr<Gfx::FloatPoint> draw_transformed_glyphs(Gfx::FloatPoint, ByteString const&, Renderer const&);
     PDFErrorOr<Gfx::FloatPoint> draw_axis_aligned_glyphs(Gfx::Painter&, Gfx::FloatPoint, ByteString const&, Renderer const&);
 
     RefPtr<Encoding> m_encoding;

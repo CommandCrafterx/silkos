@@ -458,38 +458,48 @@ PDFErrorOr<void> Renderer::fill_path_with_pattern(Gfx::Path const& path, Nonnull
     return pattern->draw(painter(), m_userspace_matrix);
 }
 
-PDFErrorOr<void> Renderer::stroke_current_path()
+PDFErrorOr<void> Renderer::stroke_path(Gfx::Path const& path)
 {
     TRY(state().stroke_color.visit(
         [&](Color const& color) -> PDFErrorOr<void> {
-            anti_aliasing_painter().stroke_path(m_current_path, color, stroke_style());
+            anti_aliasing_painter().stroke_path(path, color, stroke_style());
             return {};
         },
         [&](NonnullRefPtr<Pattern> const& pattern) -> PDFErrorOr<void> {
-            auto stroke_path = m_current_path.stroke_to_fill(stroke_style());
+            auto stroke_path = path.stroke_to_fill(stroke_style());
             return fill_path_with_pattern(stroke_path, pattern, state().stroke_alpha_constant, Gfx::WindingRule::Nonzero);
         }));
     return {};
 }
 
-PDFErrorOr<void> Renderer::fill_current_path(Gfx::WindingRule winding_rule)
+PDFErrorOr<void> Renderer::stroke_current_path()
 {
-    auto path_end = m_current_path.end();
-    m_current_path.close_all_subpaths();
+    return stroke_path(m_current_path);
+}
+
+PDFErrorOr<void> Renderer::fill_path(Gfx::Path const& path, Gfx::WindingRule winding_rule)
+{
+    auto path_end = path.end();
+    const_cast<Gfx::Path&>(path).close_all_subpaths();
     TRY(state().paint_color.visit(
         [&](Color const& color) -> PDFErrorOr<void> {
-            fill_path_with_color(anti_aliasing_painter(), m_current_path, color, winding_rule);
+            fill_path_with_color(anti_aliasing_painter(), path, color, winding_rule);
             return {};
         },
         [&](NonnullRefPtr<Pattern> const& pattern) -> PDFErrorOr<void> {
-            return fill_path_with_pattern(m_current_path, pattern, state().paint_alpha_constant, winding_rule);
+            return fill_path_with_pattern(path, pattern, state().paint_alpha_constant, winding_rule);
         }));
     // .close_all_subpaths() only adds to the end of the path, so we can .trim() the path to remove any changes.
-    m_current_path.trim(path_end);
+    const_cast<Gfx::Path&>(path).trim(path_end);
     return {};
 }
 
-PDFErrorOr<void> Renderer::fill_and_stroke_current_path(Gfx::WindingRule winding_rule)
+PDFErrorOr<void> Renderer::fill_current_path(Gfx::WindingRule winding_rule)
+{
+    return fill_path(m_current_path, winding_rule);
+}
+
+PDFErrorOr<void> Renderer::fill_and_stroke_path(Gfx::Path const& path, Gfx::WindingRule winding_rule)
 {
     // Note: Just drawing the stroke on top of the fill is incorrect if the stroke is not opaque.
     // See "Special Path-Painting Considerations" on page 569 of the PDF 1.7 spec:
@@ -497,9 +507,14 @@ PDFErrorOr<void> Renderer::fill_and_stroke_current_path(Gfx::WindingRule winding
     // (The spec says this in the language of knockout groups.)
     // Having said that, while Acrobat Reader and PDFium get this right, PDF.js and Preview.app do not.
     // FIXME: Once we have support for transparency groups, do this per spec.
-    TRY(fill_current_path(winding_rule));
-    TRY(stroke_current_path());
+    TRY(fill_path(path, winding_rule));
+    TRY(stroke_path(path));
     return {};
+}
+
+PDFErrorOr<void> Renderer::fill_and_stroke_current_path(Gfx::WindingRule winding_rule)
+{
+    return fill_and_stroke_path(m_current_path, winding_rule);
 }
 
 RENDERER_HANDLER(path_stroke)
@@ -587,6 +602,7 @@ RENDERER_HANDLER(path_intersect_clip_evenodd)
 
 RENDERER_HANDLER(text_begin)
 {
+    m_clip_from_text.clear();
     m_text_matrix = Gfx::AffineTransform();
     m_text_line_matrix = Gfx::AffineTransform();
     m_text_rendering_matrix_is_dirty = true;
@@ -595,7 +611,10 @@ RENDERER_HANDLER(text_begin)
 
 RENDERER_HANDLER(text_end)
 {
-    // FIXME: Do we need to do anything here?
+    // See comment in paint_text_glyphs().
+    if (!m_clip_from_text.is_empty())
+        TRY(add_clip_path(m_clip_from_text, Gfx::WindingRule::Nonzero));
+    m_clip_from_text.clear();
     return {};
 }
 
@@ -1886,6 +1905,39 @@ Gfx::AffineTransform const& Renderer::calculate_text_rendering_matrix() const
         m_text_rendering_matrix_is_dirty = false;
     }
     return m_text_rendering_matrix;
+}
+
+bool Renderer::needs_vector_glyphs_for_current_text() const
+{
+    if (text_state().rendering_mode != TextRenderingMode::Fill || !state().paint_color.has<Color>())
+        return true;
+
+    auto const& text_rendering_matrix = calculate_text_rendering_matrix();
+    // Fast path: Use cached bitmap glyphs.
+    return !text_rendering_matrix.is_identity_or_translation_or_scale(Gfx::AffineTransform::AllowNegativeScaling::Yes);
+}
+
+PDFErrorOr<void> Renderer::paint_text_glyphs(Gfx::Path const& text_path)
+{
+    // 5.2.5 Text Rendering Mode
+    auto const mode = text_state().rendering_mode;
+    using enum TextRenderingMode;
+    if (mode == Fill || mode == FillAndClip)
+        TRY(fill_path(text_path, Gfx::WindingRule::Nonzero));
+    else if (mode == Stroke || mode == StrokeAndClip)
+        TRY(stroke_path(text_path));
+    else if (mode == FillThenStroke || mode == FillStrokeAndClip)
+        TRY(fill_and_stroke_path(text_path, Gfx::WindingRule::Nonzero));
+
+    // "The behavior of the clipping modes requires further explanation. Glyph outlines
+    //  begin accumulating if a BT operator is executed while the text rendering mode is
+    //  set to a clipping mode or if it is set to a clipping mode within a text object. Glyphs
+    //  accumulate until the text object is ended by an ET operator; the text rendering
+    //  mode must not be changed back to a nonclipping mode before that point."
+    if (mode == Clip || mode == FillAndClip || mode == StrokeAndClip || mode == FillStrokeAndClip)
+        m_clip_from_text.append_path(text_path);
+
+    return {};
 }
 
 PDFErrorOr<void> Renderer::render_type3_glyph(Gfx::FloatPoint point, StreamObject const& glyph_data, Gfx::AffineTransform const& font_matrix, Optional<NonnullRefPtr<DictObject>> resources)
