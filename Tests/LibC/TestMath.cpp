@@ -277,12 +277,21 @@ TEST_CASE(gamma)
     EXPECT(isnan(tgamma(-INFINITY)));
     EXPECT(isnan(tgamma(-5)));
 
-    // TODO: investigate Stirling approximation implementation of gamma function
+    // TODO: Stirling approximation is not precise for small values.
+    //       Eyeballed from the graph on https://en.wikipedia.org/wiki/Stirling%27s_approximation,
+    //       we should use another approximation for x < 2.
     // EXPECT_APPROXIMATE(tgamma(0.5), sqrt(M_PI));
     EXPECT_EQ(tgammal(21.0l), 2'432'902'008'176'640'000.0l);
     EXPECT_EQ(tgamma(19.0), 6'402'373'705'728'000.0);
     EXPECT_EQ(tgammaf(11.0f), 3628800.0f);
     EXPECT_EQ(tgamma(4.0), 6);
+
+    // The stirling approximation for log(gamma(x)) is O(log(x)), so the error
+    // of 10 is well inside the range. That being said, we're off the expected
+    // results because our log(x) is not precise.
+    // Expected results are from WolframAlpha.
+    EXPECT_APPROXIMATE_WITH_ERROR(lgamma(128738941), 2275241556.917756, 10);
+    EXPECT_APPROXIMATE_WITH_ERROR(lgamma(128738943), 2275241594.264350, 10);
 
     EXPECT_EQ(lgamma(1.0), 0.0);
     EXPECT_EQ(lgamma(2.0), 0.0);
@@ -394,4 +403,70 @@ TEST_CASE(round)
 
     EXPECT_EQ(round(9999999999999.5), 10000000000000.0);
     EXPECT_EQ(round(-9999999999999.5), -10000000000000.0);
+}
+
+TEST_CASE(hypot)
+{
+    double r = hypot(INFINITY, INFINITY);
+    EXPECT(isinf(r));
+    EXPECT(!signbit(r));
+    r = hypot(INFINITY, NAN);
+    EXPECT(isinf(r));
+    EXPECT(!signbit(r));
+    r = hypot(+INFINITY, 42);
+    EXPECT(isinf(r));
+    EXPECT(!signbit(r));
+    r = hypot(42, -INFINITY);
+    EXPECT(isinf(r));
+    EXPECT(!signbit(r));
+
+    EXPECT(isnan(hypot(NAN, NAN)));
+    EXPECT(isnan(hypot(+NAN, 42)));
+    EXPECT(isnan(hypot(42, -NAN)));
+}
+
+TEST_CASE(tanh)
+{
+    EXPECT(isnan(tanh(AK::NaN<double>)));
+
+    EXPECT_EQ(tanh(0.0), 0);
+    EXPECT_EQ(signbit(tanh(0.0)), 0);
+    EXPECT_EQ(tanh(-0.0), 0);
+    EXPECT_EQ(signbit(tanh(-0.0)), 1);
+
+    EXPECT_EQ(tanh(AK::Infinity<double>), 1.0);
+    EXPECT_EQ(tanh(-AK::Infinity<double>), -1.0);
+}
+
+TEST_CASE(sinh)
+{
+    EXPECT(isnan(sinh(AK::NaN<double>)));
+
+    EXPECT_EQ(sinh(0.0), 0.0);
+    EXPECT_EQ(sinh(-0.0), -0.0);
+    EXPECT_EQ(sinh(AK::Infinity<double>), AK::Infinity<double>);
+    EXPECT_EQ(sinh(-AK::Infinity<double>), -AK::Infinity<double>);
+}
+
+TEST_CASE(cosh)
+{
+    EXPECT(isnan(cosh(AK::NaN<double>)));
+
+    EXPECT_EQ(cosh(0.0), 1.0);
+    EXPECT_EQ(cosh(-0.0), 1.0);
+
+    EXPECT_EQ(cosh(AK::Infinity<double>), AK::Infinity<double>);
+    EXPECT_EQ(cosh(-AK::Infinity<double>), AK::Infinity<double>);
+}
+
+TEST_CASE(exp)
+{
+    EXPECT(isnan(exp(AK::NaN<double>)));
+
+    EXPECT_EQ(exp(0.0), 1.0);
+    EXPECT_EQ(exp(-0.0), 1.0);
+
+    EXPECT_EQ(exp(-AK::Infinity<double>), 0.0);
+
+    EXPECT_EQ(exp(AK::Infinity<double>), AK::Infinity<double>);
 }
